@@ -76,7 +76,7 @@ function Invoke-FullVerify {
             $vdone += $r
             $t = $vsw.Elapsed.TotalSeconds
             if ($t - $vlast -ge $progressSec) {
-                Log ("  verify {0,7:N2} GB  {1,6:N0} MB/s" -f ($vdone/1GB), ($vdone/1MB/$t))
+                Log ("  verify {0,7:N2} GB  {1,6:N0} MB/s" -f @(($vdone/1GB), (($vdone/1MB)/$t)))
                 $vlast = $t
             }
         }
@@ -261,8 +261,7 @@ try {
                 $mbps   = [math]::Round(($dBytes / 1MB) / $dTime, 1)
                 $etaSec = if (($dBytes / $dTime) -gt 0) { [math]::Round(($partSize - $done) / ($dBytes / $dTime)) } else { 0 }
                 $etaH = [math]::Floor($etaSec / 3600); $etaM = [math]::Floor(($etaSec % 3600) / 60)
-                Log ("{0,7:N2} GB / {1:N2} GB  ({2,5:0.00} %)   {3,7} MB/s   ETA {4}h {5}m" -f (`
-                    $done/1GB, $partSize/1GB, (100.0*$done/$partSize), $mbps, $etaH, $etaM))
+                Log ("{0,7:N2} GB / {1:N2} GB  ({2,5:0.00} %)   {3,7} MB/s   ETA {4}h {5}m" -f @(($done/1GB), ($partSize/1GB), ((100.0*$done)/$partSize), $mbps, $etaH, $etaM))
             }
             $lastBytes = $done; $lastTime = $now
             $lastReport = [System.Diagnostics.Stopwatch]::StartNew()

@@ -156,6 +156,34 @@ Deliverables next to the image: `<name>.img`, `<name>.img.sha256`,
   `SHA256Managed`). Hold it in a variable: `$empty = New-Object byte[] 0` then
   `TransformFinalBlock($empty, 0, 0)`. This bug sits at the very END of the job
   (after the copy is done), so it hides in review and only surfaces at finalize.
+- **`-f` with divisions in the argument list is a runtime crash in PS 5.1.**
+  The comma operator binds TIGHTER than `/`, so
+  `"..." -f ($a/1GB, $b/1GB)` parses as `"..." -f ($a/(1GB,$b)) / 1GB` →
+  `Method invocation failed because [System.Object[]] does not contain a method
+  named 'op_Division'`. The bare multi-arg form (`-f $a/1GB, $b/1GB`) is just as
+  bad — only the first arg reaches `-f`, giving "Index (zero based) must be greater
+  than or equal to zero and less than the size of the argument list." Both forms
+  PARSE fine, so the bug sits in a progress-report line and kills the whole long
+  job at its first 15-second checkpoint while everything else looks healthy.
+  **Fix: parenthesize every element:** `-f @(($a/1GB), ($b/1GB))` — verified
+  working in PS 5.1.
+- **Long jobs must run DETACHED** (`Start-Process -WindowStyle Hidden`).
+  A job attached to a console dies when that window closes. Symptom of the
+  attached-job death: log ends at "Streaming started" with no error (exceptions
+  print to the console, never to the log file), target file stays at 0 bytes,
+  and the next status check shows no process. Three separate E: job launches died
+  this way before the start script was rewritten to launch detached.
+- **A status script must be honest** — check (a) process liveness by command
+  line, (b) file growth over a few seconds, (c) tail the log. Reporting "in
+  progress" from file size alone will show "in progress" for a DEAD job that
+  wrote > 0 bytes before dying. Extra trap: a `Get-CimInstance Win32_Process`
+  scan for `*image_edrive.ps1*` matches the status script's OWN powershell (its
+  command line contains the search string) → phantom "RUNNING" with a PID that
+  changes every invocation. Exclude with `-notlike '*Win32_Process*'`.
+- **In .cmd, `%` inside a PowerShell format string must be `%%`** (cmd eats one
+  layer). A bare `%` in `-f "... ({2:0.2} %) ..."` gets consumed during batch
+  parsing and the format string breaks at runtime — only on the code path that
+  actually reaches it, so a fresh-target test won't catch it.
 - **NAS free-space parsing**: `fsutil volume diskfree \\nas\share` prints formatted
   numbers; strip non-digits before comparing (the imager does this best-effort).
 

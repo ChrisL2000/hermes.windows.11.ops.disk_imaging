@@ -50,6 +50,7 @@ $startBody = @'
 rem ===========================================================================
 rem  @@JOB@@_start.cmd -- start or resume the @@JOB@@ raw disk image
 rem  Run from your home dir:   @@JOB@@_start.cmd
+rem  Launches DETACHED (hidden console): closing any window CANNOT kill it.
 rem  Auto-elevates to admin if needed (physical disk access).
 rem  Safe to re-run: it continues from wherever the .img left off.
 rem ===========================================================================
@@ -61,45 +62,72 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$t='@@TARGET@@'; if (Test-Path -LiteralPath $t) { $len=(Get-Item -LiteralPath $t -Force).Length; $exp=@@EXPECTED@@; if ($len -ge $exp) { Write-Host '@@JOB@@ image already complete ({0} bytes). Nothing to do. Run @@JOB@@_verify.cmd for a read-back hash.' -f $len; exit 2 } }"
 if %errorlevel% equ 2 exit /b 0
 
+rem --- already running? (exclude this check's own process) ---
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$m = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ($_.Name -eq 'powershell.exe') -and ($_.CommandLine -like '*@@IMAGER_LEAF@@*') -and ($_.CommandLine -notlike '*Win32_Process*') };" ^
+  "if ($m) { Write-Host ('@@JOB@@ imager already running (PID ' + ($m | Select-Object -First 1).ProcessId + '). Leave it alone; watch with @@JOB@@_status.cmd.'); exit 3 }"
+if %errorlevel% equ 3 exit /b 0
+
 rem --- need admin to open the physical disk; self-elevate if missing ---
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Elevation required to read the physical disk. A UAC prompt will appear.
+    echo Elevation required to read the physical disk. A UAC prompt will appear; accept it.
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%COMSPEC%' -ArgumentList '/c \"%~f0\"' -Verb RunAs"
     exit /b
 )
 
-rem --- run the imager (it handles resume internally) ---
-powershell -NoProfile -ExecutionPolicy Bypass -File "@@IMAGER@@" @@EXTRA@@
+rem --- launch DETACHED (hidden console): survives any window close ---
+echo Starting @@JOB@@ imager (detached, hidden console).
+echo It keeps running even if you close this window or any other.
+echo Watch progress with:  @@JOB@@_status.cmd
+echo Log file:  %USERPROFILE%\@@LOG@@
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"@@IMAGER@@\"' @@EXTRA@@ -WindowStyle Hidden"
+if %errorlevel% neq 0 (
+    echo FAILED to launch the imager. Run manually: powershell -NoProfile -ExecutionPolicy Bypass -File "@@IMAGER@@" @@EXTRA@@
+    exit /b 1
+)
+echo Launched. Verify within a minute with:  @@JOB@@_status.cmd
+exit /b 0
 
 endlocal
 '@
 $startBody = $startBody.Replace("@@TARGET@@", $Target).Replace("@@EXPECTED@@", $ExpectedBytes).Replace("@@IMAGER@@", $imagerRef).Replace("@@JOB@@", $Job)
-$extra = if ($WholeDisk) { "-WholeDisk" } else { "" }
+$startBody = $startBody.Replace("@@IMAGER_LEAF@@", (Split-Path $imagerRef -Leaf))
+$extra = if ($WholeDisk) { "-WholeDisk " } else { "" }
 $startBody = $startBody.Replace("@@EXTRA@@", $extra)
+$startBody = $startBody.Replace("@@LOG@@", $LogName)
 [System.IO.File]::WriteAllText($startCmd, $startBody.Replace("`n", "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
 # --- STATUS ------------------------------------------------------------------
 $statusBody = @'
 @echo off
 rem ===========================================================================
-rem  @@JOB@@_status.cmd -- live progress (no admin needed)
+rem  @@JOB@@_status.cmd -- HONEST status: process liveness + file growth
+rem  (no admin needed)
 rem  Run from your home dir:   @@JOB@@_status.cmd
-rem  Shows current size on target + tail of the progress log, live.
 rem ===========================================================================
 setlocal
 cd /d "%USERPROFILE%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$t='@@TARGET@@'; $exp=@@EXPECTED@@;" ^
-  "Write-Host ('Target: ' + $t);" ^
-  "if (Test-Path -LiteralPath $t) { $len=(Get-Item -LiteralPath $t -Force).Length;" ^
-  "  Write-Host ('Written : {0:N0} / {1:N0} bytes  ({2:0.2} %)  ~{3:N0} GB / {4:N0} GB' -f $len,$exp,(100.0*$len/$exp),($len/1GB),($exp/1GB));" ^
-  "  if ($len -ge $exp) { Write-Host 'STATUS: COMPLETE (run @@JOB@@_verify.cmd for read-back hash)' } else { Write-Host 'STATUS: in progress' } }" ^
-  "else { Write-Host 'STATUS: not started (no target file yet)' };" ^
-  "if (Test-Path '@@LOG@@') { Write-Host ''; Write-Host '--- last 12 log lines (live, Ctrl+C to stop) ---'; Get-Content '@@LOG@@' -Tail 12 -Wait }"
+  "$m = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ($_.Name -eq 'powershell.exe') -and ($_.CommandLine -like '*@@IMAGER_LEAF@@*') -and ($_.CommandLine -notlike '*Win32_Process*') -and ($_.CommandLine -notlike '*Start-Process*') };" ^
+  "if ($m) { $pid1 = ($m | Select-Object -First 1).ProcessId } else { $pid1 = $null };" ^
+  "Write-Host ('Target : ' + $t);" ^
+  "Write-Host ('Process: ' + $(if ($pid1) { 'RUNNING (PID ' + $pid1 + ')' } else { 'NOT RUNNING' }));" ^
+  "if (Test-Path -LiteralPath $t) { $a=(Get-Item -LiteralPath $t -Force).Length;" ^
+  "  Start-Sleep 5;" ^
+  "  $b=(Get-Item -LiteralPath $t -Force).Length;" ^
+  "  Write-Host ('Size   : {0:N0} / {1:N0} bytes  ({2:0.2} %%)  ~{3:N0} GB / {4:N0} GB' -f $b,$exp,(100.0*$b/$exp),($b/1GB),($exp/1GB));" ^
+  "  if ($b -ge $exp) { Write-Host 'STATUS: COMPLETE (run @@JOB@@_verify.cmd for read-back hash)'; }" ^
+  "  elseif ($b -gt $a) { Write-Host ('STATUS: RUNNING and writing (+' + ($b-$a).ToString('N0') + ' bytes in 5 s)'); }" ^
+  "  elseif ($pid1) { Write-Host 'STATUS: PROCESS ALIVE BUT FILE NOT GROWING in 5 s - possibly stalled/retrying; check the log below.'; }" ^
+  "  else { Write-Host 'STATUS: STOPPED (process gone, image incomplete). Resume with: @@JOB@@_start.cmd'; } }" ^
+  "else { Write-Host 'STATUS: NOT STARTED (no target file yet). Start with: @@JOB@@_start.cmd'; }" ^
+  "if (Test-Path '@@LOG@@') { Write-Host ''; Write-Host '--- last 12 log lines (live, Ctrl+C to stop watching) ---'; Get-Content '@@LOG@@' -Tail 12 -Wait }"
 endlocal
 '@
 $statusBody = $statusBody.Replace("@@TARGET@@", $Target).Replace("@@EXPECTED@@", $ExpectedBytes).Replace("@@LOG@@", $LogName).Replace("@@JOB@@", $Job)
+$statusBody = $statusBody.Replace("@@IMAGER_LEAF@@", (Split-Path $imagerRef -Leaf))
 [System.IO.File]::WriteAllText($statusCmd, $statusBody.Replace("`n", "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
 # --- VERIFY ------------------------------------------------------------------
